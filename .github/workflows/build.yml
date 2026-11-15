@@ -1,0 +1,66 @@
+name: Build APK from ZIP
+
+on:
+  push:
+    paths:
+      - '**.zip'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Localizar o ZIP mais recente (qualquer nome) e extrair
+        run: |
+          set -e
+          best=""; best_ts=0
+          while IFS= read -r -d '' z; do
+            ts=$(git log -1 --format=%ct -- "$z")
+            [ -z "$ts" ] && ts=0
+            if [ "$ts" -ge "$best_ts" ]; then best="$z"; best_ts=$ts; fi
+          done < <(find . -name '*.zip' -not -path './.git/*' -print0)
+          [ -n "$best" ] || { echo "Nenhum .zip encontrado no repositório"; exit 1; }
+          echo "ZIP selecionado: $best"
+          rm -rf "$RUNNER_TEMP/proj" && mkdir -p "$RUNNER_TEMP/proj"
+          unzip -q "$best" -d "$RUNNER_TEMP/proj"
+          settings=$(find "$RUNNER_TEMP/proj" \( -name settings.gradle.kts -o -name settings.gradle \) | awk '{print length, $0}' | sort -n | head -n1 | cut -d' ' -f2-)
+          [ -n "$settings" ] || { echo "settings.gradle(.kts) não encontrado dentro do ZIP"; exit 1; }
+          echo "PROJECT_DIR=$(dirname "$settings")" >> "$GITHUB_ENV"
+          echo "Projeto em: $(dirname "$settings")"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+
+      - name: Testes unitários
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          if [ -f gradlew ]; then chmod +x gradlew; ./gradlew --no-daemon testDebugUnitTest; else gradle --no-daemon testDebugUnitTest; fi
+
+      - name: Compilar APK debug
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          if [ -f gradlew ]; then ./gradlew --no-daemon assembleDebug; else gradle --no-daemon assembleDebug; fi
+
+      - name: Verificar APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          APK=$(find . -path '*outputs/apk/debug*' -name '*.apk' | head -n1)
+          test -n "$APK" || { echo "APK não encontrado"; exit 1; }
+          ls -lh "$APK"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: APK-debug
+          path: ${{ env.PROJECT_DIR }}/**/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          
